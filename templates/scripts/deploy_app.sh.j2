@@ -1,0 +1,112 @@
+#!/bin/bash
+# Arguments from Webhook:
+# 1: App Name (e.g., "customer-portal")
+# 2: Docker Image (e.g., "ghcr.io/user/repo:latest")
+# 3: DB Required ("true" or "false")
+
+APP_NAME=$1
+IMAGE=$2
+DB_REQUIRED=$3
+DB_ENV_MAPPING=$4
+
+SECRETS_FILE="{{ secrets_dir }}/apps/${APP_NAME}.env"
+
+# Validation
+if [[ -z "$APP_NAME" || -z "$IMAGE" ]]; then
+  echo "Error: Missing arguments."
+  exit 1
+fi
+
+echo "Starting deployment for $APP_NAME..."
+
+# --- STEP 1: DATABASE PROVISIONING (If required) ---
+if [ "$DB_REQUIRED" == "true" ]; then
+  
+  # Check if credentials already exist
+  if [ ! -f "$SECRETS_FILE" ]; then
+      echo "Generating new DB credentials for $APP_NAME..."
+      
+      # Generate random password (20 chars, secure)
+      DB_USER="${APP_NAME}_user"
+      DB_NAME="${APP_NAME}_db"
+      DB_HOST="platform-db-1"
+      DB_PASS=$(pwgen -s 24 1)
+      
+      # Execute SQL (Idempotent: only create if not exists)
+      docker exec platform-db-1 psql -U postgres -c "CREATE USER \"$DB_USER\" WITH PASSWORD '$DB_PASS';" || true
+      docker exec platform-db-1 psql -U postgres -c "CREATE DATABASE \"$DB_NAME\" OWNER \"$DB_USER\";" || true
+      docker exec platform-db-1 psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE \"$DB_NAME\" TO \"$DB_USER\";" || true
+      
+      # Write secrets file
+      echo "# Auto-generated secrets for $APP_NAME" > "$SECRETS_FILE"
+      echo "DB_HOST=$DB_HOST" >> "$SECRETS_FILE"
+      echo "DB_NAME=$DB_NAME" >> "$SECRETS_FILE"
+      echo "DB_USER=$DB_USER" >> "$SECRETS_FILE"
+      echo "DB_PASS=$DB_PASS" >> "$SECRETS_FILE"
+      # Optional: Connection String (JDBC/DSN)
+      DATABASE_URL_VAL="postgres://$DB_USER:$DB_PASS@$DB_HOST:5432/$DB_NAME"
+      echo "DATABASE_URL=$DATABASE_URL_VAL" >> "$SECRETS_FILE"
+
+      # --- Custom Environment Variable Mapping ---
+      if [ -n "$DB_ENV_MAPPING" ]; then
+          echo "# Custom Mappings" >> "$SECRETS_FILE"
+          IFS=',' read -ra MAPPINGS <<< "$DB_ENV_MAPPING"
+          for mapping in "${MAPPINGS[@]}"; do
+              IFS='=' read -r target source <<< "$mapping"
+              val=""
+              case "$source" in
+                  DB_USER) val="$DB_USER" ;;
+                  DB_PASS) val="$DB_PASS" ;;
+                  DB_NAME) val="$DB_NAME" ;;
+                  DB_HOST) val="$DB_HOST" ;;
+                  DATABASE_URL) val="$DATABASE_URL_VAL" ;;
+                  *) echo "Warning: Unknown source variable $source in mapping";;
+              esac
+              
+              if [ -n "$val" ]; then
+                  echo "$target=$val" >> "$SECRETS_FILE"
+              fi
+          done
+      else
+          # Default: Standard Postgres Env Vars
+          echo "POSTGRES_HOST=$DB_HOST" >> "$SECRETS_FILE"
+          echo "POSTGRES_DB=$DB_NAME" >> "$SECRETS_FILE"
+          echo "POSTGRES_USER=$DB_USER" >> "$SECRETS_FILE"
+          echo "POSTGRES_PASSWORD=$DB_PASS" >> "$SECRETS_FILE"
+      fi
+      
+      chmod 600 "$SECRETS_FILE"
+  else
+      echo "Existing credentials found in $SECRETS_FILE."
+  fi
+  
+  ENV_ARG="--env-file $SECRETS_FILE"
+else
+  ENV_ARG=""
+fi
+
+# --- STEP 2: CONTAINER DEPLOYMENT ---
+
+# Pull latest image
+docker pull $IMAGE
+
+# Stop/Remove old container
+docker rm -f $APP_NAME || true
+
+# Start new container
+# Connect to 'proxy-net' so Traefik can route traffic
+docker run -d \
+  --name $APP_NAME \
+  --restart always \
+  --network proxy-net \
+  $ENV_ARG \
+  --label "traefik.enable=true" \
+  --label "traefik.http.routers.${APP_NAME}.rule=Host(\"${APP_NAME}.{{ domain_name }}\")" \
+  --label "traefik.http.routers.${APP_NAME}.entrypoints=websecure" \
+  --label "traefik.http.routers.${APP_NAME}.tls.certresolver=myresolver" \
+  $IMAGE
+  
+# Hack: Connect container to internal network for DB access
+docker network connect internal-net $APP_NAME
+
+echo "Deployment of $APP_NAME finished."

@@ -1,0 +1,154 @@
+networks:
+  proxy-net:
+    external: true
+  internal-net:
+    external: true
+
+services:
+# --- REVERSE PROXY (TRAEFIK) ---
+  traefik:
+    image: traefik:v3.6 
+    restart: always
+    networks:
+      - proxy-net
+{% if env == 'production' %}
+    environment:
+      - CHECKDOMAIN_TOKEN={{ dns_api_token }}
+{% endif %}
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    command:
+      - "--providers.docker=true"
+      - "--providers.file.filename=/etc/traefik/dynamic.yml"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=proxy-net"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Global HTTP -> HTTPS Redirection (v3 Syntax)
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+{% if env == 'production' %}
+      - "--certificatesresolvers.myresolver.acme.dnschallenge.provider=checkdomain"
+      - "--certificatesresolvers.myresolver.acme.dnschallenge.delaybeforecheck=60"
+      - "--certificatesresolvers.myresolver.acme.email={{ acme_email }}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.myresolver.acme.dnschallenge.resolvers=1.1.1.1:53"
+      # Production: Insecure API for localhost tunnel access
+      - "--api.insecure=true"
+{% endif %}
+      - "--api.dashboard=true"
+
+    ports:
+      - "80:80"
+      - "443:443"
+{% if env == 'production' %}
+      - "127.0.0.1:8080:8080"
+{% endif %}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/acme.json:/letsencrypt/acme.json
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+{% if env == 'local' %}
+      - ./certs:/certs:ro
+{% endif %}
+    labels:
+      - "traefik.enable=true"
+{% if env == 'local' %}
+      # Local: Expose Dashboard via Traefik Router
+      - "traefik.http.routers.api.rule=Host(`traefik.{{ domain_name }}`)"
+      - "traefik.http.routers.api.service=api@internal"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls=true"
+      - "traefik.http.routers.api.middlewares=auth"
+      - "traefik.http.middlewares.auth.basicauth.users={{ traefik_dashboard_auth | replace('$', '$$') }}"
+{% endif %}
+
+  # --- MANAGEMENT UI (PORTAINER) ---
+  portainer:
+    image: portainer/portainer-ce:latest
+    restart: always
+    networks:
+      - proxy-net
+      - internal-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    secrets:
+      - portainer_pass
+{% if env == 'production' %}
+    ports:
+      - "127.0.0.1:9000:9000"
+{% endif %}
+    labels:
+      - "traefik.enable=true"
+{% if env == 'local' %}
+      - "traefik.http.routers.portainer.rule=Host(`portainer.{{ domain_name }}`)"
+      - "traefik.http.routers.portainer.entrypoints=websecure"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+      - "traefik.http.routers.portainer.tls=true"
+{% endif %}
+
+  # --- SHARED DATABASE (POSTGRES) ---
+  db:
+    image: postgres:16-alpine
+    restart: always
+    networks:
+      - internal-net
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_root_pass
+    secrets:
+      - db_root_pass
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  netdata:
+    image: netdata/netdata:stable
+    container_name: netdata
+    hostname: "monitor.{{ domain_name }}"
+    restart: unless-stopped
+    cap_add:
+      - SYS_PTRACE
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    networks:
+      - proxy-net
+      - internal-net
+{% if env == 'production' %}
+    ports:
+      - "127.0.0.1:19999:19999"
+{% endif %}
+    volumes:
+      - {{ netdata_config_dir }}/health_alarm_notify.conf:/etc/netdata/health_alarm_notify.conf
+      - {{ netdata_config_dir }}/postgres.conf:/etc/netdata/go.d/postgres.conf
+      - netdatalib:/var/lib/netdata
+      - netdatacache:/var/cache/netdata
+      - /etc/passwd:/host/etc/passwd:ro
+      - /etc/group:/host/etc/group:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys/fs/cgroup:/host/sys/fs/cgroup:ro
+    labels:
+      - "traefik.enable=true"
+{% if env == 'local' %}
+      - "traefik.http.routers.netdata.rule=Host(`monitor.{{ domain_name }}`)"
+      - "traefik.http.routers.netdata.entrypoints=websecure"
+      - "traefik.http.routers.netdata.tls=true"
+      - "traefik.http.services.netdata.loadbalancer.server.port=19999"
+      - "traefik.http.routers.netdata.middlewares=auth"
+{% endif %}
+volumes:
+  portainer_data:
+  db_data:
+  netdatalib:
+  netdatacache:
+
+secrets:
+  db_root_pass:
+    file: {{ secrets_dir }}/postgres_password.txt
+  portainer_pass:
+    file: {{ secrets_dir }}/portainer_password.txt

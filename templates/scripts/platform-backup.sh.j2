@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_PATH="{{ backup_dir }}/$TIMESTAMP"
+mkdir -p $BACKUP_PATH
+
+echo "Starting Backup for $TIMESTAMP..."
+
+# 1. Database Dump
+docker exec platform-db-1 pg_dumpall -U postgres > "$BACKUP_PATH/full_db_dump.sql"
+
+# 2. Portainer Data
+tar -czf "$BACKUP_PATH/portainer_data.tar.gz" -C /var/lib/docker/volumes/platform_portainer_data/_data .
+
+# 3. Delete old local backups (> 7 days)
+find {{ backup_dir }} -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
+
+# 4. Offsite Sync (Google Drive)
+echo "Syncing to Google Drive..."
+# The bucket name is injected via variable
+rclone sync {{ backup_dir }} remote:{{ gcp_storage_bucket }}          
+
+echo "Backup finished successfully."

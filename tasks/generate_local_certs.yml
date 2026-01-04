@@ -1,0 +1,57 @@
+---
+- name: Create Certificates Directory
+  file:
+    path: "{{ install_dir }}/certs"
+    state: directory
+    mode: '0755'
+
+# 1. ROOT CA: Private Key
+- name: Generate Self-Signed Root CA Private Key
+  community.crypto.openssl_privatekey:
+    path: "{{ install_dir }}/certs/rootCA.key"
+  register: ca_key
+
+# 2. ROOT CA: CSR (This defines the Subject/CN)
+- name: Generate Root CA CSR
+  community.crypto.openssl_csr:
+    path: "{{ install_dir }}/certs/rootCA.csr"
+    privatekey_path: "{{ install_dir }}/certs/rootCA.key"
+    common_name: "Wondrax Local Root CA"
+    basic_constraints:
+      - 'CA:TRUE'
+    basic_constraints_critical: yes
+    key_usage:
+      - keyCertSign
+    key_usage_critical: yes
+
+# 3. ROOT CA: Certificate (Self-Signed using the CSR)
+- name: Generate Root CA Certificate
+  community.crypto.x509_certificate:
+    path: "{{ install_dir }}/certs/rootCA.pem"
+    csr_path: "{{ install_dir }}/certs/rootCA.csr" # Uses the CSR from step 2
+    privatekey_path: "{{ install_dir }}/certs/rootCA.key"
+    provider: selfsigned
+    selfsigned_not_after: "+3650d"
+    # 'subject' parameter removed; logic is now in the CSR
+
+# 4. WILDCARD: Private Key
+- name: Generate Wildcard Private Key
+  community.crypto.openssl_privatekey:
+    path: "{{ install_dir }}/certs/wildcard.key"
+
+# 5. WILDCARD: CSR
+- name: Generate Wildcard CSR
+  community.crypto.openssl_csr:
+    path: "{{ install_dir }}/certs/wildcard.csr"
+    privatekey_path: "{{ install_dir }}/certs/wildcard.key"
+    common_name: "*.{{ domain_name }}"
+
+# 6. WILDCARD: Certificate (Signed by Root CA)
+- name: Sign Wildcard Certificate with Root CA
+  community.crypto.x509_certificate:
+    path: "{{ install_dir }}/certs/wildcard.pem"
+    csr_path: "{{ install_dir }}/certs/wildcard.csr"
+    ownca_path: "{{ install_dir }}/certs/rootCA.pem"
+    ownca_privatekey_path: "{{ install_dir }}/certs/rootCA.key"
+    provider: ownca
+    ownca_not_after: "+365d"

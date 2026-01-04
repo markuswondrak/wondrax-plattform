@@ -1,0 +1,19 @@
+# .gitignore
+
+# Terraform Dateien
+.terraform/
+*.tfstate
+*.tfstate.backup
+
+# Konfiguration mit echten Daten
+terraform.tfvars
+
+# Generierte Secrets
+gcs-key.json
+
+# Ansible vault secrets
+secrets.yml
+.vault_pass
+
+# Ansible inventory
+inventory.ini

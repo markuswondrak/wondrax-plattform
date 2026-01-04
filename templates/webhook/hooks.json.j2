@@ -1,0 +1,35 @@
+[
+  {
+    "id": "deploy-app",
+    "execute-command": "/usr/local/bin/deploy_app.sh",
+    "command-working-directory": "/tmp",
+    "pass-arguments-to-command": [
+      {
+        "source": "url",
+        "name": "app_name"
+      },
+      {
+        "source": "payload",
+        "name": "image"
+      },
+      {
+        "source": "url",
+        "name": "db_required"
+      },
+      {
+        "source": "url",
+        "name": "db_env_mapping"
+      }
+    ],
+    "trigger-rule": {
+      "match": {
+        "type": "payload-hash-sha256",
+        "secret": "{{ webhook_secret }}", 
+        "parameter": {
+          "source": "header",
+          "name": "X-Hub-Signature-256"
+        }
+      }
+    }
+  }
+]

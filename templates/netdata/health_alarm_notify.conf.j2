@@ -1,0 +1,13 @@
+# Send warnings and critical alarms
+SEND_EMAIL="NO"
+SEND_DISCORD="YES"      # Or SEND_SLACK="YES", SEND_TELEGRAM="YES"
+SEND_PUSHOVER="NO"
+
+# Inject variable from secrets.yml
+DISCORD_WEBHOOK_URL="{{ monitor_webhook_url }}"
+# For Slack: SLACK_WEBHOOK_URL="{{ monitor_webhook_url }}"
+
+# Default recipient (must be configured for Netdata to know where to send)
+DEFAULT_RECIPIENT_DISCORD="alerts" 
+# For Discord, the channel is often irrelevant as it's in the webhook, 
+# but Netdata needs a string here.

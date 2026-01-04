@@ -1,0 +1,13 @@
+[Unit]
+Description=Internal Webhook for DB Provisioning
+After=network.target
+
+[Service]
+# Listen on port 9000
+ExecStart=/usr/bin/webhook -nopanic -verbose -hooks /etc/webhook/hooks.json -port 9000
+Restart=always
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

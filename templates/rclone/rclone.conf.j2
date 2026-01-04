@@ -1,0 +1,8 @@
+[remote]
+type = google cloud storage
+# Use the Service Account from the secrets file
+service_account_file = {{ secrets_dir }}/gdrive-sa.json
+# Access Control List for new objects
+object_acl = private
+# Optional: Explicitly set storage class (Standard, Nearline, Coldline)
+storage_class = STANDARD

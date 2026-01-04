@@ -1,0 +1,314 @@
+---
+- name: Setup Production Container Platform
+  hosts: server
+  become: yes
+
+  # Load the encrypted secrets file containing sensitive data
+  vars_files:
+    - secrets.yml
+
+  vars:
+    # --- CONFIGURATION (Non-sensitive values only) ---
+    # These values are now loaded from secrets.yml
+    
+    # Paths
+    install_dir: "/opt/platform"
+    secrets_dir: "/opt/secrets"
+    backup_dir: "/opt/backups"
+    netdata_config_dir: "{{ install_dir }}/netdata"
+
+    # stage configuration (local or production)
+    env: production
+  tasks:
+    # ---------------------------------------------------------
+    # 1. SYSTEM INITIALIZATION & HARDENING
+    # ---------------------------------------------------------
+    - name: Ignore Man-Pages and documentation
+      copy:
+        dest: /etc/dpkg/dpkg.cfg.d/01_nodoc
+        content: |
+          path-exclude /usr/share/doc/*
+          path-include /usr/share/doc/*/copyright
+          path-exclude /usr/share/man/*
+          path-exclude /usr/share/groff/*
+          path-exclude /usr/share/info/*
+          path-exclude /usr/share/lintian/*
+          path-exclude /usr/share/linda/*
+
+    - name: Update apt and install system utilities
+      apt:
+        update_cache: yes
+        name: [curl, gnupg, lsb-release, ufw, fail2ban, unattended-upgrades, python3-pip, python3-docker, rclone, pwgen, jq] # Added pwgen and jq
+        state: present
+
+    - name: Configure UFW Firewall (Allow SSH, HTTP, HTTPS)
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '22'
+        - '80'
+        - '443'
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+
+    # ---------------------------------------------------------
+    # 2. CONTAINER RUNTIME ENVIRONMENT
+    # ---------------------------------------------------------
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker Repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+        state: present
+
+    - name: Install Docker Engine
+      apt:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-compose-plugin]
+        state: present
+
+    - name: Create Docker Network 'proxy-net'
+      docker_network:
+        name: proxy-net
+        state: present
+
+    - name: Create Docker Network 'internal-net'
+      docker_network:
+        name: internal-net
+        internal: yes
+        attachable: yes
+        state: present
+
+    - name: Create Base Directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ install_dir }}"
+        - "{{ backup_dir }}"
+
+    # ---------------------------------------------------------
+    # 3. TRAFFIC ROUTING & SECURITY (Ingress)
+    # ---------------------------------------------------------
+    - name: Generate Local Self-Signed Certificates
+      include_tasks: tasks/generate_local_certs.yml
+      when: env == 'local'
+
+    - name: Create Traefik Directory
+      file:
+        path: "{{ install_dir }}/traefik"
+        state: directory
+        mode: '0755'
+
+    - name: Create acme.json for Traefik
+      file:
+        path: "{{ install_dir }}/traefik/acme.json"
+        state: touch
+        mode: '0600'
+
+    - name: Create Traefik Dynamic Config
+      template:
+        src: templates/traefik/dynamic.yml.j2
+        dest: "{{ install_dir }}/traefik/dynamic.yml"
+
+    # ---------------------------------------------------------
+    # 4. DEPLOYMENT AUTOMATION (CI/CD)
+    # ---------------------------------------------------------
+    - name: Install 'webhook' tool
+      apt:
+        name: webhook
+        state: present
+
+    - name: Create Webhook Configuration Directory
+      file:
+        path: /etc/webhook
+        state: directory
+
+    - name: Configure Webhook hooks.json
+      template:
+        src: templates/webhook/hooks.json.j2
+        dest: /etc/webhook/hooks.json
+
+    - name: Create Systemd Service for Webhook
+      template:
+        src: templates/webhook/webhook.service.j2
+        dest: /etc/systemd/system/webhook.service
+
+    - name: Enable and Start Webhook Service
+      systemd:
+        name: webhook
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Allow Docker Containers to access Webhook (Port 9000)
+      ufw:
+        rule: allow
+        port: '9000'
+        proto: tcp
+        # IMPORTANT: Restrict access to the internal Docker network range.
+        # Adjust 172.16.0.0/12 if your Docker network configuration differs.
+        src: 172.16.0.0/12
+
+    - name: Create App Secrets Directory
+      file:
+        path: "{{ secrets_dir }}/apps"
+        state: directory
+        mode: '0700'
+
+    - name: Install Smart Deployment Script
+      template:
+        src: templates/scripts/deploy_app.sh.j2
+        dest: "/usr/local/bin/deploy_app.sh"
+        mode: '0700'
+
+    # ---------------------------------------------------------
+    # 5. OBSERVABILITY & MONITORING
+    # ---------------------------------------------------------
+    - name: Create Netdata Config Directory
+      file:
+        path: "{{ netdata_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    # Configure Netdata to send alerts to the Webhook
+    - name: Configure Netdata Alerting (health_alarm_notify.conf)
+      template:
+        src: templates/netdata/health_alarm_notify.conf.j2
+        dest: "{{ netdata_config_dir }}/health_alarm_notify.conf"
+        mode: '0644'
+
+    # ---------------------------------------------------------
+    # 6. DATA MANAGEMENT & PERSISTENCE
+    # ---------------------------------------------------------
+    - name: Create Secrets directory (RESTRICTED)
+      file:
+        path: "{{ secrets_dir }}"
+        state: directory
+        mode: '0600'
+
+    # --- NETDATA DATABASE PASSWORD ---
+    - name: Generate Netdata DB Password
+      shell: "pwgen -s 16 1"
+      register: netdata_pw_gen
+      changed_when: false
+
+    - name: Save Netdata DB Password
+      copy:
+        content: "{{ netdata_pw_gen.stdout }}"
+        dest: "{{ secrets_dir }}/netdata_password.txt"
+        mode: '0600'
+        force: no
+
+    - name: Read Netdata DB Password
+      slurp:
+        src: "{{ secrets_dir }}/netdata_password.txt"
+      register: netdata_pw_file
+
+    - name: Set Netdata Password Fact
+      set_fact:
+        netdata_db_password: "{{ netdata_pw_file['content'] | b64decode | trim }}"
+
+    - name: Configure Netdata Postgres Collector
+      template:
+        src: templates/netdata/postgres.conf.j2
+        dest: "{{ netdata_config_dir }}/postgres.conf"
+        mode: '0644'
+
+    # Use the variable from secrets.yml
+    - name: Initialize DB Password Secret
+      copy:
+        content: "{{ db_password }}"
+        dest: "{{ secrets_dir }}/postgres_password.txt"
+        mode: '0600'
+        force: no
+
+    - name: Install Database Creation Helper Script
+      template:
+        src: templates/scripts/create_db_user.sh.j2
+        dest: "/usr/local/bin/create_db_user.sh"
+        mode: '0700' # Executable by root only
+
+    - name: Initialize Portainer Admin Password Secret
+      copy:
+        # Ansible's password_hash filter generates the required bcrypt hash
+        content: "{{ portainer_password | password_hash('blowfish') }}" 
+        dest: "{{ secrets_dir }}/portainer_password.txt"
+        mode: '0600'
+        force: no
+
+    # ---------------------------------------------------------
+    # 7. BACKUP & DISASTER RECOVERY
+    # ---------------------------------------------------------
+    
+    # Uses gdrive_sa_json from secrets.yml
+    - name: Write Google Service Account JSON
+      copy:
+        content: "{{ gdrive_sa_json }}"
+        dest: "{{ secrets_dir }}/gdrive-sa.json"
+        mode: '0600'
+
+    - name: Create Rclone Config directory
+      file:
+        path: /root/.config/rclone
+        state: directory
+        mode: '0700'
+
+    - name: Configure Rclone (Google Cloud Storage)
+      template:
+        src: templates/rclone/rclone.conf.j2
+        dest: /root/.config/rclone/rclone.conf
+        mode: '0600'
+
+    - name: Create Backup Script
+      template:
+        src: templates/scripts/platform-backup.sh.j2
+        dest: "/usr/local/bin/platform-backup.sh"
+        mode: '0700'
+          
+    - name: Setup Cronjob for Backup (Daily at 3 AM)
+      cron:
+        name: "Platform Daily Backup"
+        minute: "0"
+        hour: "3"
+        job: "/usr/local/bin/platform-backup.sh >> /var/log/platform-backup.log 2>&1"
+
+    # ---------------------------------------------------------
+    # 8. PLATFORM DEFINITION (DOCKER COMPOSE)
+    # ---------------------------------------------------------
+    - name: Create docker-compose.yml
+      template:
+        src: templates/platform/docker-compose.yml.j2
+        dest: "{{ install_dir }}/docker-compose.yml"
+
+    - name: Start Docker Compose Stack
+      community.docker.docker_compose_v2:
+        project_src: "{{ install_dir }}"
+        state: present
+
+    # ---------------------------------------------------------
+    # 9. POST-DEPLOYMENT CONFIGURATION
+    # ---------------------------------------------------------
+    - name: Wait for Database to be ready
+      command: docker exec platform-db-1 pg_isready
+      register: db_check
+      until: db_check.rc == 0
+      retries: 20
+      delay: 5
+
+    - name: Create Netdata User in DB
+      command: >
+        docker exec platform-db-1 psql -U postgres -c 
+        "do $$ begin if not exists (select from pg_roles where rolname = 'netdata') then create role netdata login password '{{ netdata_db_password }}'; end if; end $$;"
+      
+    - name: Grant pg_monitor to Netdata
+      command: >
+        docker exec platform-db-1 psql -U postgres -c
+        "GRANT pg_monitor TO netdata;"

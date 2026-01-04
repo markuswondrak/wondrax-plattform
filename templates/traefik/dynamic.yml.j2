@@ -1,0 +1,33 @@
+http:
+  routers:
+    webhook-router:
+      rule: "Host(`hooks.{{ domain_name }}`)"
+      service: webhook-service
+      entryPoints:
+        - websecure
+      # Router-specific TLS settings
+      tls:
+        {% if env == 'production' %}
+        certResolver: myresolver
+        {% else %}
+        # In local mode, we just want to enable TLS. 
+        # The certificates are loaded from the global 'tls' section below.
+        {} 
+        {% endif %}
+
+  services:
+    webhook-service:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:9000"
+
+# --- GLOBAL CONFIGURATION ---
+{% if env == 'local' %}
+# 'stores' must be at the root level, NOT inside a router
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/wildcard.pem
+        keyFile: /certs/wildcard.key
+{% endif %}
